@@ -39,7 +39,7 @@ def normalize_domains(raw_list):
         try:
             parsed = urlparse(item if item.startswith("http") else f"http://{item}")
             domain = parsed.netloc or parsed.path
-            domain = domain.lower().replace("www.", "")
+            domain = domain.lower().replace("www.", "").rstrip("/")
             if domain and domain not in seen:
                 domains.append(domain)
                 seen.add(domain)
@@ -75,14 +75,22 @@ async def suggest_blocked_sites(category: Category = Query(..., description="Cho
             '[{"domain": "facebook.com", "reason": "social media"}, ...]'
         )
 
-        user_prompt = (
-            f"Please suggest 20–30 popular websites in the category: {category.value} "
-            "in South Africa. Include well-known websites, if category is adult include adult sites. "
-            "Respond ONLY in valid JSON array format."
-        )
+        # Use category-specific prompts
+        if category == Category.ai_tools:
+            user_prompt = (
+                "Please provide 20–30 popular AI tools, AI platforms, or AI models websites. "
+                "Include websites like ChatGPT, DeepSeek, OpenAI, HuggingFace, Bard, and other well-known AI tools. "
+                "Respond ONLY in a valid JSON array format like: "
+                '[{"domain": "chat.openai.com", "reason": "AI chatbot"}, ...]'
+            )
+        else:
+            user_prompt = (
+                f"Please suggest 20–30 popular websites in the category: {category.value} "
+                "in South Africa. Include well-known websites, if category is adult include adult sites. "
+                "Respond ONLY in valid JSON array format."
+            )
 
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-
         payload = {
             "model": MODEL_NAME,
             "messages": [
@@ -105,7 +113,6 @@ async def suggest_blocked_sites(category: Category = Query(..., description="Cho
             if not isinstance(blocked_sites, list):
                 blocked_sites = []
         except json.JSONDecodeError:
-            # fallback: extract individual JSON objects
             blocked_sites = extract_json_objects(answer_text)
 
         # Normalize domains
@@ -114,9 +121,19 @@ async def suggest_blocked_sites(category: Category = Query(..., description="Cho
 
         # Fallback if still empty
         if not blocked_sites:
-            raw_sites = [w.strip() for w in answer_text.replace("\n", ",").split(",") if w.strip()]
-            normalized = normalize_domains(raw_sites)
-            blocked_sites = [{"domain": d, "reason": category.value} for d in normalized]
+            if category == Category.ai_tools:
+                # Hardcoded AI tools fallback
+                blocked_sites = [
+                    {"domain": "chat.openai.com", "reason": "AI chatbot"},
+                    {"domain": "huggingface.co", "reason": "AI models & datasets"},
+                    {"domain": "deepseek.ai", "reason": "AI search platform"},
+                    {"domain": "bard.google.com", "reason": "AI chatbot"},
+                    {"domain": "runwayml.com", "reason": "AI creative tools"},
+                ]
+            else:
+                raw_sites = [w.strip() for w in answer_text.replace("\n", ",").split(",") if w.strip()]
+                normalized = normalize_domains(raw_sites)
+                blocked_sites = [{"domain": d, "reason": category.value} for d in normalized]
 
         return blocked_sites
 
