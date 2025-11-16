@@ -6,7 +6,7 @@ import json
 from pydantic import BaseModel
 from enum import Enum
 from urllib.parse import urlparse
-import validators  # pip install validators
+import validators  
 
 router = APIRouter(prefix="/suggest", tags=["suggest"])
 
