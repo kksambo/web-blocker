@@ -13,12 +13,17 @@ import validators
 
 # ---------------- Config ----------------
 DB_FILE = "proxy_app.db"
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # set this in your environment if you want AI classification
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # set this in your environment to enable AI classification
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL_NAME = "llama-3.1-8b-instant"
 
+# Domains that must never be auto-blocked by this service (comma separated env var)
+# default includes this common backend hostname and localhost entries
+NO_BLOCK_ENV = os.getenv("NO_BLOCK_DOMAINS", "web-blocker.onrender.com,localhost,127.0.0.1")
+NO_BLOCK_DOMAINS = {d.strip().lower() for d in NO_BLOCK_ENV.split(",") if d.strip()}
+
 # ---------------- App ----------------
-app = FastAPI(title="Proxy Management API with AI Blocking")
+app = FastAPI(title="Proxy Management API with AI Blocking (whitelist-safe)")
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +37,7 @@ app.add_middleware(
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Users (kept as before)
+    # Users
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +58,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT,
             status TEXT,
+            reason TEXT,
             timestamp TEXT
         )
     """)
@@ -73,6 +79,7 @@ class LogEntry(BaseModel):
     domain: str
     status: str  # "ALLOWED" or "BLOCKED"
     timestamp: str = None
+    reason: str = None
 
 class DomainRequest(BaseModel):
     domain: str
@@ -97,10 +104,24 @@ def is_valid_domain(domain: str) -> bool:
     except Exception:
         return False
 
+def in_no_block_list(domain: str) -> bool:
+    """Return True if domain matches any NO_BLOCK_DOMAINS entry (substring match)."""
+    d = domain.lower()
+    for nb in NO_BLOCK_DOMAINS:
+        if not nb:
+            continue
+        if nb == d or nb in d or d in nb:
+            return True
+    return False
+
 def add_blocked_site(domain: str):
     """Insert domain into blocked_sites table (idempotent)."""
     domain = normalize_domain(domain)
     if not domain:
+        return
+    if in_no_block_list(domain):
+        # Don't add whitelisted domains
+        print(f"[INFO] Skipping adding whitelisted domain to blocked_sites: {domain}")
         return
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -114,21 +135,46 @@ def add_blocked_site(domain: str):
     finally:
         conn.close()
 
-def log_site(domain: str, status: str):
+def log_site(domain: str, status: str, reason: str = None):
     """Add a log entry for domain status."""
     ts = datetime.datetime.now().isoformat()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT INTO logs (domain, status, timestamp) VALUES (?, ?, ?)", (domain, status, ts))
+    c.execute("INSERT INTO logs (domain, status, reason, timestamp) VALUES (?, ?, ?, ?)", (domain, status, reason or "", ts))
     conn.commit()
     conn.close()
 
-# ---------------- Local fallback lists ----------------
+# ---------------- Local fallback lists (expanded) ----------------
 AI_TOOLS = {
     "chat.openai.com", "openai.com", "huggingface.co", "bard.google.com", "runwayml.com",
-    "perplexity.ai", "midjourney.com", "stability.ai", "replit.com"
+    "perplexity.ai", "midjourney.com", "stability.ai", "replit.com", "notion.ai",
+    "copy.ai", "jasper.ai", "writesonic.com", "you.com", "ai21.com"
 }
-GAMBLING_SITES = {"betway.co.za", "sportingbet.co.za", "bet.co.za", "worldbetting.co.za"}
+GAMBLING_SITES = {
+    "betway.co.za", "sportingbet.co.za", "bet.co.za", "worldbetting.co.za", "betsafe.co.za",
+    "bet365.com", "1xbet.com", "pinnacle.com"
+}
+STREAMING_SITES = {
+    # common legitimate streaming services; you'll likely want to treat only specific streaming sites as 'unwanted' if necessary
+    "netflix.com", "disneyplus.com", "hulu.com", "primevideo.com", "twitch.tv"
+}
+PORN_SITES_SAMPLE = {
+    "xnxx.com", "xvideos.com", "pornhub.com", "xhamster.com", "redtube.com"
+}
+MALICIOUS_SAMPLE = {
+    "malware.example", "badsite.example"  # placeholder entries
+}
+
+# Combined quick-check set mapping to reason
+QUICK_CHECK_MAP = {}
+for d in AI_TOOLS:
+    QUICK_CHECK_MAP[d] = "ai tool"
+for d in GAMBLING_SITES:
+    QUICK_CHECK_MAP[d] = "gambling"
+for d in PORN_SITES_SAMPLE:
+    QUICK_CHECK_MAP[d] = "adult"
+for d in MALICIOUS_SAMPLE:
+    QUICK_CHECK_MAP[d] = "malicious"
 
 # ---------------- Existing endpoints (users, blocked sites, logs) ----------------
 
@@ -193,7 +239,7 @@ async def receive_log(log: LogEntry):
     ts = log.timestamp or datetime.datetime.now().isoformat()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("INSERT INTO logs (domain, status, timestamp) VALUES (?, ?, ?)", (log.domain, log.status, ts))
+    c.execute("INSERT INTO logs (domain, status, reason, timestamp) VALUES (?, ?, ?, ?)", (log.domain, log.status, log.reason or "", ts))
     conn.commit()
     conn.close()
     return {"message": "Log received"}
@@ -202,22 +248,22 @@ async def receive_log(log: LogEntry):
 def get_logs():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT domain, status, timestamp FROM logs ORDER BY id DESC")
+    c.execute("SELECT domain, status, reason, timestamp FROM logs ORDER BY id DESC")
     rows = c.fetchall()
     conn.close()
-    return [{"domain": r[0], "status": r[1], "timestamp": r[2]} for r in rows]
+    return [{"domain": r[0], "status": r[1], "reason": r[2], "timestamp": r[3]} for r in rows]
 
 @app.get("/")
 def root():
-    return {"message": "Proxy Management API is running"}
+    return {"message": "Proxy Management API is running (whitelist-safe)"}
 
 # ---------------- AI Analysis endpoint ----------------
 @app.post("/analyze-domain")
 async def analyze_domain(req: DomainRequest):
     """
     Receives JSON { "domain": "example.com" }
-    Returns {"unwanted": true/false}
-    If unwanted == true -> automatically adds to blocked_sites and logs it.
+    Returns {"unwanted": true/false, "reason": "category"}
+    If unwanted == true -> automatically adds to blocked_sites and logs it (unless domain is whitelisted).
     """
     domain_raw = req.domain
     domain = normalize_domain(domain_raw)
@@ -225,22 +271,35 @@ async def analyze_domain(req: DomainRequest):
     if not domain or not is_valid_domain(domain):
         raise HTTPException(status_code=400, detail="Invalid domain")
 
-    # Quick local checks first
-    if domain in AI_TOOLS or domain in GAMBLING_SITES:
-        add_blocked_site(domain)
-        log_site(domain, "BLOCKED")
-        return {"unwanted": True}
+    # Do not analyze or block domains in the no-block whitelist
+    if in_no_block_list(domain):
+        log_site(domain, "ALLOWED", "whitelisted")
+        return {"unwanted": False, "reason": "whitelisted"}
 
-    # If no API key, default to ALLOW but log it
+    # Quick local checks using known lists (fast)
+    # Exact match or substring match for quick detection
+    for k, reason in QUICK_CHECK_MAP.items():
+        if k in domain:
+            # add_blocked_site will check whitelist again
+            add_blocked_site(domain)
+            log_site(domain, "BLOCKED", reason)
+            return {"unwanted": True, "reason": reason}
+
+    # If no API key, default to ALLOW but log it (you can change to default block if desired)
     if not GROQ_API_KEY:
-        log_site(domain, "ALLOWED")
-        return {"unwanted": False}
+        log_site(domain, "ALLOWED", "no_api_key")
+        return {"unwanted": False, "reason": "no_api_key"}
 
-    # Prepare prompts for the model (keep short deterministic answer)
-    system_prompt = "You are a classifier that answers ONLY 'Yes' or 'No'."
+    # Prompt: be specific to the categories the user wants (betting, streaming, porn, ai tools, unsafe)
+    system_prompt = (
+        "You are a classifier. Answer in a single short sentence or word: 'Yes' or 'No'. "
+        "You must only judge whether the domain is unwanted for general users because it belongs to one of these categories: "
+        "gambling/betting, porn/adult, unsafe/malicious, or AI tools (if the site is an AI tool). "
+        "If 'Yes', follow with a short category keyword in parentheses — e.g. 'Yes (gambling)'."
+    )
     user_prompt = (
-        f"Is the website domain '{domain}' unwanted for typical users (gambling, malicious, adult content, or an AI tool) ? "
-        "Answer Yes or No."
+        f"Is the domain '{domain}' unwanted for general users because it is gambling, streaming of pirated content, porn/adult, malicious, or an AI tool? "
+        "Answer exactly like 'Yes (category)' or 'No'. Categories: gambling, streaming, porn, malicious, ai_tool."
     )
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -250,8 +309,8 @@ async def analyze_domain(req: DomainRequest):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "max_tokens": 8,
-        "temperature": 0.0
+        "max_tokens": 12,
+        "temperature": 0.0,
     }
 
     try:
@@ -260,36 +319,70 @@ async def analyze_domain(req: DomainRequest):
             res.raise_for_status()
             data = res.json()
 
-            # Attempt to parse common response formats
+            # Parse best-effort for "Yes (category)" or "No"
             answer_text = ""
             if isinstance(data, dict):
-                # common structure: choices -> [ { message: { content: "Yes" } } ]
                 choices = data.get("choices") or []
                 if choices and isinstance(choices, list):
                     first = choices[0]
                     msg = first.get("message") or {}
-                    answer_text = (msg.get("content") or "").strip().lower()
+                    answer_text = (msg.get("content") or "").strip()
                 else:
-                    # fallback: try data['text'] or other fields
-                    answer_text = (data.get("text") or "").strip().lower()
+                    answer_text = (data.get("text") or "").strip()
 
-            answer_text = (answer_text or "").lower()
-            unwanted = "yes" in answer_text
+            answer_text = (answer_text or "").strip()
+            answer_lc = answer_text.lower()
 
-            if unwanted:
-                add_blocked_site(domain)
-                log_site(domain, "BLOCKED")
+            unwanted = False
+            reason = None
+
+            if answer_lc.startswith("yes"):
+                unwanted = True
+                # extract category between parentheses if present
+                if "(" in answer_text and ")" in answer_text:
+                    reason = answer_text.split("(", 1)[1].split(")", 1)[0].strip()
+                else:
+                    # Try to find known keywords
+                    for kw in ["gambling", "betting", "porn", "adult", "streaming", "malicious", "ai", "ai_tool", "ai tool"]:
+                        if kw in answer_lc:
+                            reason = kw
+                            break
+                    if not reason:
+                        reason = "unwanted"
+            elif answer_lc.startswith("no"):
+                unwanted = False
+                reason = "allowed"
             else:
-                log_site(domain, "ALLOWED")
+                # fallback parse: look for keywords
+                for kw in ["gambling", "betting", "porn", "adult", "streaming", "malicious", "ai", "ai_tool"]:
+                    if kw in answer_lc:
+                        unwanted = True
+                        reason = kw
+                        break
+                if reason is None:
+                    unwanted = False
+                    reason = "unknown"
 
-            return {"unwanted": unwanted}
+            # If unwanted and not in whitelist, add & log
+            if unwanted:
+                if in_no_block_list(domain):
+                    # don't block whitelisted domains
+                    log_site(domain, "ALLOWED", "whitelisted")
+                    return {"unwanted": False, "reason": "whitelisted"}
+                add_blocked_site(domain)
+                log_site(domain, "BLOCKED", reason)
+            else:
+                log_site(domain, "ALLOWED", reason)
+
+            return {"unwanted": unwanted, "reason": reason, "model_answer": answer_text}
 
     except Exception as e:
-        # On AI failure: log and default to allow (fail-open). You can change to fail-closed if desired.
+        # On AI failure: log and default to allow (fail-open). Change to block if desired.
         print(f"[WARNING] AI analyze failed for {domain}: {e}")
-        log_site(domain, "ALLOWED")
-        return {"unwanted": False}
+        log_site(domain, "ALLOWED", "ai_error")
+        return {"unwanted": False, "reason": "ai_error"}
 
 # ---------------- Run ----------------
 if __name__ == "__main__":
+    print(f"[INFO] NO_BLOCK_DOMAINS = {NO_BLOCK_DOMAINS}")
     uvicorn.run(app, host="0.0.0.0", port=8000)
