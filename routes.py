@@ -1,9 +1,10 @@
 import re
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Query
 import httpx
 import os
 import json
 from pydantic import BaseModel
+from enum import Enum
 from urllib.parse import urlparse
 
 router = APIRouter(prefix="/suggest", tags=["suggest"])
@@ -15,7 +16,16 @@ MODEL_NAME = "llama-3.1-8b-instant"
 
 class BlockedSite(BaseModel):
     domain: str
-    reason: str  # explanation why it might be blocked
+    reason: str
+
+
+class Category(str, Enum):
+    social_media = "social media"
+    streaming = "streaming"
+    gambling = "gambling"
+    ai_tools = "ai tools"
+    gaming = "gaming"
+    shopping = "shopping"
 
 
 def normalize_domains(raw_list):
@@ -39,10 +49,7 @@ def normalize_domains(raw_list):
 
 
 def extract_json_objects(text):
-    """
-    Extract all JSON objects from a string, ignoring extra commentary.
-    Returns a list of Python dicts.
-    """
+    """Extract all JSON objects from a string."""
     objs = []
     for match in re.finditer(r"\{.*?\}", text, re.DOTALL):
         try:
@@ -55,7 +62,7 @@ def extract_json_objects(text):
 
 
 @router.get("/blocked-sites", response_model=list[BlockedSite])
-async def suggest_blocked_sites(background_tasks: BackgroundTasks):
+async def suggest_blocked_sites(category: Category = Query(..., description="Choose a category")):
     if not GROQ_API_KEY:
         raise HTTPException(status_code=500, detail="GROQ_API_KEY not set in environment")
 
@@ -63,14 +70,16 @@ async def suggest_blocked_sites(background_tasks: BackgroundTasks):
         system_prompt = (
             "You are StudyBuddy, an AI administrative assistant. "
             "Do NOT provide academic answers. "
-            "Suggest a list of websites that South African universities typically block for students, "
-            "such as social media, streaming, gambling, or adult content sites. "
-            "Provide each domain with a short reason why it might be blocked. "
-            "Return the response as a JSON array like: "
+            "Suggest a list of websites in the category provided by the user. "
+            "Return each domain with a short reason in JSON array like: "
             '[{"domain": "facebook.com", "reason": "social media"}, ...]'
         )
 
-        user_prompt = "Please suggest 8-12 blocked websites for students in South Africa."
+        user_prompt = (
+            f"Please suggest 20–30 popular websites in the category: {category.value} "
+            "in South Africa. Include well-known websites, if category is adult include adult sites. "
+            "Respond ONLY in valid JSON array format."
+        )
 
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
 
@@ -80,28 +89,34 @@ async def suggest_blocked_sites(background_tasks: BackgroundTasks):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 300,
+            "max_tokens": 700,
         }
 
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             res = await client.post(GROQ_URL, headers=headers, json=payload)
             res.raise_for_status()
             data = res.json()
 
         answer_text = data["choices"][0]["message"]["content"].strip()
 
-        # Extract JSON objects only
-        blocked_sites = extract_json_objects(answer_text)
+        # Try parsing JSON array first
+        try:
+            blocked_sites = json.loads(answer_text)
+            if not isinstance(blocked_sites, list):
+                blocked_sites = []
+        except json.JSONDecodeError:
+            # fallback: extract individual JSON objects
+            blocked_sites = extract_json_objects(answer_text)
 
         # Normalize domains
         for site in blocked_sites:
-            site["domain"] = normalize_domains([site["domain"]])[0] if site["domain"] else site["domain"]
+            site["domain"] = normalize_domains([site.get("domain", "")])[0] if site.get("domain") else ""
 
-        # Fallback if no JSON objects found
+        # Fallback if still empty
         if not blocked_sites:
             raw_sites = [w.strip() for w in answer_text.replace("\n", ",").split(",") if w.strip()]
             normalized = normalize_domains(raw_sites)
-            blocked_sites = [{"domain": d, "reason": "blocked"} for d in normalized]
+            blocked_sites = [{"domain": d, "reason": category.value} for d in normalized]
 
         return blocked_sites
 
