@@ -11,3 +11,4 @@ python-jose
 pydantic
 pydantic[email]
 httpx
+validators
