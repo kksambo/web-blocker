@@ -10,6 +10,12 @@ import os
 import httpx
 from urllib.parse import urlparse
 import validators
+import routes
+
+app = FastAPI()
+
+
+
 
 # ---------------- Config ----------------
 DB_FILE = "proxy_app.db"
@@ -276,7 +282,7 @@ def delete_blocked_site(domain: str):
     conn.commit()
     conn.close()
     return {"message": f"Site '{domain}' has been removed from blocked sites"}
-
+app.include_router(routes.router)
 @app.post("/logs")
 async def receive_log(log: LogEntry):
     ts = log.timestamp or datetime.datetime.now().isoformat()
