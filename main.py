@@ -14,35 +14,31 @@ import routes
 
 app = FastAPI()
 
-
-
-
 # ---------------- Config ----------------
 DB_FILE = "proxy_app.db"
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")  # set to enable AI classification
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL_NAME = "llama-3.1-8b-instant"
 
-# Domains that must never be auto-blocked by this service (comma-separated env var)
 NO_BLOCK_ENV = os.getenv("NO_BLOCK_DOMAINS", "web-blocker.onrender.com,localhost,127.0.0.1")
 NO_BLOCK_DOMAINS = {d.strip().lower() for d in NO_BLOCK_ENV.split(",") if d.strip()}
 
 # ---------------- App ----------------
-app = FastAPI(title="Proxy Management API with AI Blocking (whitelist-safe)")
+app = FastAPI(title="Proxy Management API with AI Blocking (school-safe strict mode)")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---------------- DB Setup (with migration) ----------------
+# ---------------- DB Setup ----------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # Users
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,28 +46,24 @@ def init_db():
             password TEXT
         )
     """)
-    # Blocked sites
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS blocked_sites (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             site TEXT UNIQUE
         )
     """)
-    # Logs - initial columns
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT,
             status TEXT,
-            timestamp TEXT
+            timestamp TEXT,
+            reason TEXT
         )
     """)
-    # Migration: add 'reason' column if missing
-    try:
-        c.execute("ALTER TABLE logs ADD COLUMN reason TEXT")
-    except sqlite3.OperationalError:
-        # column exists already
-        pass
+
     conn.commit()
     conn.close()
 
@@ -87,7 +79,7 @@ class Site(BaseModel):
 
 class LogEntry(BaseModel):
     domain: str
-    status: str  # "ALLOWED" or "BLOCKED"
+    status: str
     timestamp: Optional[str] = None
     reason: Optional[str] = None
 
@@ -95,58 +87,44 @@ class DomainRequest(BaseModel):
     domain: str
 
 # ---------------- Utilities ----------------
+
 def normalize_domain(domain: str) -> str:
-    """Return normalized domain (no scheme, no www, lowercase)."""
     if not domain:
         return domain
     try:
         parsed = urlparse(domain if domain.startswith("http") else f"http://{domain}")
         domain_norm = parsed.netloc or parsed.path
-        domain_norm = domain_norm.lower().replace("www.", "").rstrip("/")
-        return domain_norm
-    except Exception:
+        return domain_norm.lower().replace("www.", "").rstrip("/")
+    except:
         return domain.lower().strip()
 
 def is_valid_domain(domain: str) -> bool:
-    """Validate domain using validators.domain (returns bool)."""
     try:
         return bool(domain) and validators.domain(domain)
-    except Exception:
+    except:
         return False
 
 def in_no_block_list(domain: str) -> bool:
-    """True if domain equals or is subdomain of any entry in NO_BLOCK_DOMAINS."""
     d = domain.lower()
     for nb in NO_BLOCK_DOMAINS:
-        if not nb:
-            continue
-        # match exact or subdomain (e.g., sub.example.com endswith example.com)
         if d == nb or d.endswith("." + nb):
             return True
     return False
 
 def add_blocked_site(domain: str):
-    """Add domain to blocked_sites (idempotent)."""
     domain = normalize_domain(domain)
-    if not domain:
-        return
     if in_no_block_list(domain):
-        print(f"[INFO] Not blocking whitelisted domain: {domain}")
         return
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
         c.execute("INSERT INTO blocked_sites (site) VALUES (?)", (domain,))
         conn.commit()
-        print(f"[INFO] Added blocked site: {domain}")
     except sqlite3.IntegrityError:
-        # already exists
         pass
-    finally:
-        conn.close()
+    conn.close()
 
 def log_site(domain: str, status: str, reason: Optional[str] = None):
-    """Insert a log entry (always include reason column)."""
     ts = datetime.datetime.now().isoformat()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -155,78 +133,66 @@ def log_site(domain: str, status: str, reason: Optional[str] = None):
     conn.commit()
     conn.close()
 
-# ---------------- Local rule lists ----------------
-# These lists are intentionally broad substrings (fast checks).
-# You can extend them as you discover sites to block.
-SOCIAL_MEDIA = {
-    "facebook", "instagram", "tiktok", "snapchat", "twitter", "x.com", "weibo", "linkedin", "pinterest"
-}
-AI_TOOL_SITES = {
-    "chatgpt", "openai", "bard.google", "huggingface", "deepseek", "claude", "anthropic",
-    "perplexity", "replit", "copilot", "notion.ai", "jasper", "copy.ai", "writesonic"
-}
-STREAMING_SITES = {
-    # includes legal streaming and pirated services pattern keywords — treat non-academic streaming as distracting
-    "netflix", "primevideo", "hulu", "disneyplus", "twitch", "showmax", "fmovies", "123movies", "putlocker", "soap2day", "gomovies"
-}
-ADULT_SITES = {
-    "porn", "xvideos", "xnxx", "redtube", "xhamster", "pornhub", "brazzers"
-}
-GAMBLING_SITES = {
-    "betway", "bet365", "hollywoodbets", "sportingbet", "1xbet", "pinnacle", "betsafe"
-}
-MALICIOUS_KEYWORDS = {
-    "malware", "phish", "scam", "ransom", "crypto-steal", "exploit", "trojan"
-}
+# ----------------------------------------------------------------------------------
+# ⭐⭐⭐ STRICT SCHOOL SMART FILTER INSERTED HERE ⭐⭐⭐
+# ----------------------------------------------------------------------------------
 
-# Sites allowed for education (always allowed)
-EDUCATIONAL_KEYWORDS = {
-    "edu", "wikipedia", "scholar", "khanacademy", "coursera", "edx", "udemy", "moodle", "blackboard",
-    "stackoverflow", "w3schools", "geeksforgeeks", "microsoftlearn", "kaggle", "research", "springer", "ieee"
-}
-
-# Build quick-check map
-QUICK_CHECK_MAP = {}
-for d in SOCIAL_MEDIA:
-    QUICK_CHECK_MAP[d] = "social_media"
-for d in AI_TOOL_SITES:
-    QUICK_CHECK_MAP[d] = "ai_tool"
-for d in STREAMING_SITES:
-    QUICK_CHECK_MAP[d] = "streaming"
-for d in ADULT_SITES:
-    QUICK_CHECK_MAP[d] = "adult"
-for d in GAMBLING_SITES:
-    QUICK_CHECK_MAP[d] = "gambling"
-for d in MALICIOUS_KEYWORDS:
-    QUICK_CHECK_MAP[d] = "malicious"
-for d in EDUCATIONAL_KEYWORDS:
-    QUICK_CHECK_MAP[d] = "educational"
-
-# ---------------- Helper: quick check ----------------
-def quick_classify(domain: str):
+def strict_smart_filter(domain: str):
     """
-    Quick local classification using substring matching in QUICK_CHECK_MAP.
-    Returns (unwanted_bool, reason)
+    Smart school filter:
+    - Blocks: porn, gambling, AI tools, social media, streaming, malicious, cheating
+    - Allows: education sites only
     """
+
     d = domain.lower()
-    # If it's whitelisted, immediately ALLOW
-    if in_no_block_list(d):
-        return False, "whitelisted"
 
-    # Educational keywords -> allow
-    for k in EDUCATIONAL_KEYWORDS:
+    # School safe auto-allow
+    SCHOOL_SAFE = [
+        "edu", "gov", "school", "study", "learn", "library", "scholar",
+        "khanacademy", "wikipedia", "moodle", "blackboard",
+        "academ", "research", "science", "university"
+    ]
+    for k in SCHOOL_SAFE:
         if k in d:
             return False, "educational"
 
-    # Check other categories (block on match)
-    for k, reason in QUICK_CHECK_MAP.items():
-        # avoid confusing educational keyword matches (we already handled educational above)
-        if k in d and reason != "educational":
-            return True, reason
+    # Hard-block lists
+    HARD_BLOCK = [
+        # Adult
+        "porn", "xvideos", "xnxx", "redtube", "xhamster", "pornhub",
+        "brazzers", "onlyfans",
 
-    return None, None  # unknown -> let AI decide (or default allow if no AI)
+        # Gambling
+        "betway", "bet365", "hollywoodbets", "sportingbet",
+        "1xbet", "betsafe", "lottostar",
 
-# ---------------- Endpoints (users, blocked sites, logs) ----------------
+        # AI tools
+        "openai", "chatgpt", "claude", "bard", "deepseek",
+        "perplexity", "huggingface",
+
+        # Social Media
+        "facebook", "instagram", "tiktok", "snapchat",
+        "twitter", "youtube", "pinterest",
+
+        # Streaming
+        "netflix", "showmax", "primevideo", "hulu", "disney",
+        "fmovies", "soap2day", "putlocker", "123movies",
+
+        # Malicious
+        "malware", "phish", "scam", "ransom", "trojan", "hack"
+    ]
+
+    for k in HARD_BLOCK:
+        if k in d:
+            return True, k
+
+    # Unknown → let AI check
+    return None, None
+
+# ----------------------------------------------------------------------------------
+
+
+# ---------------- API ROUTES ----------------
 @app.post("/register")
 def register(user: User):
     conn = sqlite3.connect(DB_FILE)
@@ -277,12 +243,14 @@ def delete_blocked_site(domain: str):
     row = c.fetchone()
     if not row:
         conn.close()
-        raise HTTPException(status_code=404, detail=f"Site '{domain}' not found in blocked list")
+        raise HTTPException(status_code=404, detail=f"Site '{domain}' not found")
     c.execute("DELETE FROM blocked_sites WHERE site=?", (domain,))
     conn.commit()
     conn.close()
-    return {"message": f"Site '{domain}' has been removed from blocked sites"}
+    return {"message": f"Site '{domain}' removed"}
+
 app.include_router(routes.router)
+
 @app.post("/logs")
 async def receive_log(log: LogEntry):
     ts = log.timestamp or datetime.datetime.now().isoformat()
@@ -303,53 +271,46 @@ def get_logs():
     conn.close()
     return [{"domain": r[0], "status": r[1], "reason": r[2], "timestamp": r[3]} for r in rows]
 
-@app.get("/")
-def root():
-    return {"message": "Proxy Management API is running (whitelist-safe)"}
 
-# ---------------- AI Analysis endpoint ----------------
+# ---------------- AI Analysis (strict mode) ----------------
 @app.post("/analyze-domain")
 async def analyze_domain(req: DomainRequest):
-    """
-    Receives {"domain":"..."} -> returns {"unwanted": bool, "reason": "category", "model_answer": "..."}
-    Uses quick local checks first, then Groq AI fallback if available.
-    """
-    domain_raw = req.domain
-    domain = normalize_domain(domain_raw)
 
-    if not domain or not is_valid_domain(domain):
+    domain = normalize_domain(req.domain)
+    if not is_valid_domain(domain):
         raise HTTPException(status_code=400, detail="Invalid domain")
 
-    # Quick local classification
-    quick = quick_classify(domain)
-    if quick != (None, None):
-        unwanted, reason = quick
+    # 1️⃣ LOCAL STRICT SCHOOL FILTER
+    local_check = strict_smart_filter(domain)
+
+    if local_check != (None, None):
+        unwanted, reason = local_check
+
         if unwanted:
-            # if whitelisted, do not block
             if in_no_block_list(domain):
                 log_site(domain, "ALLOWED", "whitelisted")
                 return {"unwanted": False, "reason": "whitelisted"}
+
             add_blocked_site(domain)
             log_site(domain, "BLOCKED", reason)
             return {"unwanted": True, "reason": reason}
+
         else:
             log_site(domain, "ALLOWED", reason)
             return {"unwanted": False, "reason": reason}
 
-    # If no AI key, default allow (but log)
+    # 2️⃣ AI fallback (same as before)
     if not GROQ_API_KEY:
         log_site(domain, "ALLOWED", "no_api_key")
         return {"unwanted": False, "reason": "no_api_key"}
 
-    # Prepare AI prompt
     system_prompt = (
-        "You are a classifier that answers with either 'Yes (category)' or 'No'. "
-        "Categories: gambling, streaming, porn, malicious, ai_tool, social_media, distracting. "
-        "Only decide if the domain is UNWANTED for general users (not educational)."
+        "You classify domains for school internet safety. "
+        "Answer strictly 'Yes (reason)' or 'No'."
     )
     user_prompt = (
-        f"Is the domain '{domain}' unwanted for general users because it is gambling, illegal streaming, porn/adult, malicious, an AI tool, social media, or otherwise distracting/non-academic? "
-        "Answer exactly 'Yes (category)' or 'No'."
+        f"Is '{domain}' unsafe for school? Categories: porn, gambling, streaming, social_media, "
+        "ai_tool, malicious, distracting. Answer 'Yes (category)' or 'No'."
     )
 
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
@@ -359,7 +320,7 @@ async def analyze_domain(req: DomainRequest):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "max_tokens": 12,
+        "max_tokens": 10,
         "temperature": 0.0,
     }
 
@@ -367,57 +328,34 @@ async def analyze_domain(req: DomainRequest):
         async with httpx.AsyncClient(timeout=15) as client:
             res = await client.post(GROQ_URL, headers=headers, json=payload)
             res.raise_for_status()
+
             data = res.json()
+            message = data["choices"][0]["message"]["content"].strip()
+            ans = message.lower()
 
-            model_answer = ""
-            if isinstance(data, dict):
-                choices = data.get("choices") or []
-                if choices and isinstance(choices, list) and choices[0].get("message"):
-                    model_answer = (choices[0]["message"].get("content") or "").strip()
-                else:
-                    model_answer = (data.get("text") or "").strip()
-
-            answer_lc = model_answer.lower()
-            unwanted = False
-            reason = "unknown"
-
-            if answer_lc.startswith("yes"):
+            if ans.startswith("yes"):
                 unwanted = True
-                # try extract reason in parentheses
-                if "(" in model_answer and ")" in model_answer:
-                    reason = model_answer.split("(", 1)[1].split(")", 1)[0].strip()
-                else:
-                    # crude keyword extraction
-                    for kw in ["gambling", "streaming", "porn", "adult", "malicious", "ai_tool", "social_media", "distracting"]:
-                        if kw in answer_lc:
-                            reason = kw
-                            break
-                    if reason == "unknown":
-                        reason = "unwanted"
-            else:
-                unwanted = False
-                reason = "allowed"
+                reason = ans.split("(")[1].split(")")[0] if "(" in ans else "unwanted"
 
-            # Respect whitelist
-            if unwanted and in_no_block_list(domain):
-                log_site(domain, "ALLOWED", "whitelisted")
-                return {"unwanted": False, "reason": "whitelisted", "model_answer": model_answer}
+                if in_no_block_list(domain):
+                    log_site(domain, "ALLOWED", "whitelisted")
+                    return {"unwanted": False, "reason": "whitelisted"}
 
-            # Persist if unwanted
-            if unwanted:
                 add_blocked_site(domain)
                 log_site(domain, "BLOCKED", reason)
-            else:
-                log_site(domain, "ALLOWED", reason)
+                return {"unwanted": True, "reason": reason, "model_answer": message}
 
-            return {"unwanted": unwanted, "reason": reason, "model_answer": model_answer}
+            else:
+                unwanted = False
+                log_site(domain, "ALLOWED", "allowed")
+                return {"unwanted": False, "reason": "allowed", "model_answer": message}
 
     except Exception as e:
-        print(f"[WARNING] AI analyze failed for {domain}: {e}")
         log_site(domain, "ALLOWED", "ai_error")
         return {"unwanted": False, "reason": "ai_error"}
 
 # ---------------- Run ----------------
 if __name__ == "__main__":
-    print(f"[INFO] NO_BLOCK_DOMAINS = {NO_BLOCK_DOMAINS}")
+    print("[INFO] School-safe strict mode enabled")
+    print("[INFO] NO_BLOCK_DOMAINS =", NO_BLOCK_DOMAINS)
     uvicorn.run(app, host="0.0.0.0", port=8000)
