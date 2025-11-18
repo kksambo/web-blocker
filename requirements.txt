@@ -12,3 +12,5 @@ pydantic
 pydantic[email]
 httpx
 validators
+beautifulsoup4 
+httpx
