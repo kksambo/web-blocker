@@ -9,12 +9,10 @@ import os
 import httpx
 from urllib.parse import urlparse
 import validators
+from bs4 import BeautifulSoup
 import routes
 
 app = FastAPI()
-
-
-
 
 # ---------------- Config ----------------
 DB_FILE = "proxy_app.db"
@@ -119,7 +117,6 @@ def in_no_block_list(domain: str) -> bool:
     for nb in NO_BLOCK_DOMAINS:
         if not nb:
             continue
-        # match exact or subdomain (e.g., sub.example.com endswith example.com)
         if d == nb or d.endswith("." + nb):
             return True
     return False
@@ -139,7 +136,6 @@ def add_blocked_site(domain: str):
         conn.commit()
         print(f"[INFO] Added blocked site: {domain}")
     except sqlite3.IntegrityError:
-        # already exists
         pass
     finally:
         conn.close()
@@ -155,77 +151,40 @@ def log_site(domain: str, status: str, reason: Optional[str] = None):
     conn.close()
 
 # ---------------- Local rule lists ----------------
-# These lists are intentionally broad substrings (fast checks).
-# You can extend them as you discover sites to block.
-SOCIAL_MEDIA = {
-    "facebook", "instagram", "tiktok", "snapchat", "twitter", "x.com", "weibo", "linkedin", "pinterest"
-}
-AI_TOOL_SITES = {
-    "chatgpt", "openai", "bard.google", "huggingface", "deepseek", "claude", "anthropic",
-    "perplexity", "replit", "copilot", "notion.ai", "jasper", "copy.ai", "writesonic"
-}
-STREAMING_SITES = {
-    # includes legal streaming and pirated services pattern keywords — treat non-academic streaming as distracting
-    "netflix", "primevideo", "hulu", "disneyplus", "twitch", "showmax", "fmovies", "123movies", "putlocker", "soap2day", "gomovies"
-}
-ADULT_SITES = {
-    "porn", "xvideos", "xnxx", "redtube", "xhamster", "pornhub", "brazzers"
-}
-GAMBLING_SITES = {
-    "betway", "bet365", "hollywoodbets", "sportingbet", "1xbet", "pinnacle", "betsafe"
-}
-MALICIOUS_KEYWORDS = {
-    "malware", "phish", "scam", "ransom", "crypto-steal", "exploit", "trojan"
-}
-
-# Sites allowed for education (always allowed)
-EDUCATIONAL_KEYWORDS = {
-    "edu", "wikipedia", "scholar", "khanacademy", "coursera", "edx", "udemy", "moodle", "blackboard",
-    "stackoverflow", "w3schools", "geeksforgeeks", "microsoftlearn", "kaggle", "research", "springer", "ieee"
-}
+SOCIAL_MEDIA = {"facebook", "instagram", "tiktok", "snapchat", "twitter", "x.com", "weibo", "linkedin", "pinterest"}
+AI_TOOL_SITES = {"chatgpt", "openai", "bard.google", "huggingface", "deepseek", "claude", "anthropic",
+                 "perplexity", "replit", "copilot", "notion.ai", "jasper", "copy.ai", "writesonic"}
+STREAMING_SITES = {"netflix", "primevideo", "hulu", "disneyplus", "twitch", "showmax", "fmovies", "123movies", "putlocker", "soap2day", "gomovies"}
+ADULT_SITES = {"porn", "xvideos", "xnxx", "redtube", "xhamster", "pornhub", "brazzers"}
+GAMBLING_SITES = {"betway", "bet365", "hollywoodbets", "sportingbet", "1xbet", "pinnacle", "betsafe"}
+MALICIOUS_KEYWORDS = {"malware", "phish", "scam", "ransom", "crypto-steal", "exploit", "trojan"}
+EDUCATIONAL_KEYWORDS = {"edu", "wikipedia", "scholar", "khanacademy", "coursera", "edx", "udemy", "moodle", "blackboard",
+                        "stackoverflow", "w3schools", "geeksforgeeks", "microsoftlearn", "kaggle", "research", "springer", "ieee"}
 
 # Build quick-check map
 QUICK_CHECK_MAP = {}
-for d in SOCIAL_MEDIA:
-    QUICK_CHECK_MAP[d] = "social_media"
-for d in AI_TOOL_SITES:
-    QUICK_CHECK_MAP[d] = "ai_tool"
-for d in STREAMING_SITES:
-    QUICK_CHECK_MAP[d] = "streaming"
-for d in ADULT_SITES:
-    QUICK_CHECK_MAP[d] = "adult"
-for d in GAMBLING_SITES:
-    QUICK_CHECK_MAP[d] = "gambling"
-for d in MALICIOUS_KEYWORDS:
-    QUICK_CHECK_MAP[d] = "malicious"
-for d in EDUCATIONAL_KEYWORDS:
-    QUICK_CHECK_MAP[d] = "educational"
+for d in SOCIAL_MEDIA: QUICK_CHECK_MAP[d] = "social_media"
+for d in AI_TOOL_SITES: QUICK_CHECK_MAP[d] = "ai_tool"
+for d in STREAMING_SITES: QUICK_CHECK_MAP[d] = "streaming"
+for d in ADULT_SITES: QUICK_CHECK_MAP[d] = "adult"
+for d in GAMBLING_SITES: QUICK_CHECK_MAP[d] = "gambling"
+for d in MALICIOUS_KEYWORDS: QUICK_CHECK_MAP[d] = "malicious"
+for d in EDUCATIONAL_KEYWORDS: QUICK_CHECK_MAP[d] = "educational"
 
 # ---------------- Helper: quick check ----------------
 def quick_classify(domain: str):
-    """
-    Quick local classification using substring matching in QUICK_CHECK_MAP.
-    Returns (unwanted_bool, reason)
-    """
     d = domain.lower()
-    # If it's whitelisted, immediately ALLOW
     if in_no_block_list(d):
         return False, "whitelisted"
-
-    # Educational keywords -> allow
     for k in EDUCATIONAL_KEYWORDS:
         if k in d:
             return False, "educational"
-
-    # Check other categories (block on match)
     for k, reason in QUICK_CHECK_MAP.items():
-        # avoid confusing educational keyword matches (we already handled educational above)
         if k in d and reason != "educational":
             return True, reason
+    return None, None
 
-    return None, None  # unknown -> let AI decide (or default allow if no AI)
-
-# ---------------- Endpoints (users, blocked sites, logs) ----------------
+# ---------------- Endpoints ----------------
 @app.post("/register")
 def register(user: User):
     conn = sqlite3.connect(DB_FILE)
@@ -281,7 +240,9 @@ def delete_blocked_site(domain: str):
     conn.commit()
     conn.close()
     return {"message": f"Site '{domain}' has been removed from blocked sites"}
+
 app.include_router(routes.router)
+
 @app.post("/logs")
 async def receive_log(log: LogEntry):
     ts = log.timestamp or datetime.datetime.now().isoformat()
@@ -306,25 +267,19 @@ def get_logs():
 def root():
     return {"message": "Proxy Management API is running (whitelist-safe)"}
 
-# ---------------- AI Analysis endpoint ----------------
+# ---------------- AI Analysis with HTML ----------------
 @app.post("/analyze-domain")
 async def analyze_domain(req: DomainRequest):
-    """
-    Receives {"domain":"..."} -> returns {"unwanted": bool, "reason": "category", "model_answer": "..."}
-    Uses quick local checks first, then Groq AI fallback if available.
-    """
     domain_raw = req.domain
     domain = normalize_domain(domain_raw)
 
     if not domain or not is_valid_domain(domain):
         raise HTTPException(status_code=400, detail="Invalid domain")
 
-    # Quick local classification
     quick = quick_classify(domain)
     if quick != (None, None):
         unwanted, reason = quick
         if unwanted:
-            # if whitelisted, do not block
             if in_no_block_list(domain):
                 log_site(domain, "ALLOWED", "whitelisted")
                 return {"unwanted": False, "reason": "whitelisted"}
@@ -335,10 +290,23 @@ async def analyze_domain(req: DomainRequest):
             log_site(domain, "ALLOWED", reason)
             return {"unwanted": False, "reason": reason}
 
-    # If no AI key, default allow (but log)
     if not GROQ_API_KEY:
         log_site(domain, "ALLOWED", "no_api_key")
         return {"unwanted": False, "reason": "no_api_key"}
+
+    # Fetch HTML content
+    site_text = ""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            url = f"http://{domain}"
+            res = await client.get(url)
+            res.raise_for_status()
+            soup = BeautifulSoup(res.text, "html.parser")
+            site_text = ' '.join(soup.stripped_strings)
+            site_text = site_text[:5000]
+    except Exception as e:
+        print(f"[WARNING] Failed to fetch HTML for {domain}: {e}")
+        site_text = ""
 
     # Prepare AI prompt
     system_prompt = (
@@ -347,7 +315,8 @@ async def analyze_domain(req: DomainRequest):
         "Only decide if the domain is UNWANTED for general users (not educational)."
     )
     user_prompt = (
-        f"Is the domain '{domain}' unwanted for general users because it is gambling, illegal streaming, porn/adult, malicious, an AI tool, social media, or otherwise distracting/non-academic? check the domain name also make sure all aunwanted are blocked"
+        f"Domain: '{domain}'\nHTML text: '{site_text}'\n"
+        "Is this site unwanted for general users because it is gambling, illegal streaming, porn/adult, malicious, an AI tool, social media, or distracting? "
         "Answer exactly 'Yes (category)' or 'No'."
     )
 
@@ -358,7 +327,7 @@ async def analyze_domain(req: DomainRequest):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "max_tokens": 12,
+        "max_tokens": 50,
         "temperature": 0.0,
     }
 
@@ -382,11 +351,9 @@ async def analyze_domain(req: DomainRequest):
 
             if answer_lc.startswith("yes"):
                 unwanted = True
-                # try extract reason in parentheses
                 if "(" in model_answer and ")" in model_answer:
                     reason = model_answer.split("(", 1)[1].split(")", 1)[0].strip()
                 else:
-                    # crude keyword extraction
                     for kw in ["gambling", "streaming", "porn", "adult", "malicious", "ai_tool", "social_media", "distracting"]:
                         if kw in answer_lc:
                             reason = kw
@@ -397,12 +364,10 @@ async def analyze_domain(req: DomainRequest):
                 unwanted = False
                 reason = "allowed"
 
-            # Respect whitelist
             if unwanted and in_no_block_list(domain):
                 log_site(domain, "ALLOWED", "whitelisted")
                 return {"unwanted": False, "reason": "whitelisted", "model_answer": model_answer}
 
-            # Persist if unwanted
             if unwanted:
                 add_blocked_site(domain)
                 log_site(domain, "BLOCKED", reason)
