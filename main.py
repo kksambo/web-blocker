@@ -297,7 +297,7 @@ async def analyze_domain(req: DomainRequest):
     # Fetch HTML content
     site_text = ""
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             url = f"http://{domain}"
             res = await client.get(url)
             res.raise_for_status()
@@ -332,7 +332,7 @@ async def analyze_domain(req: DomainRequest):
     }
 
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=120) as client:
             res = await client.post(GROQ_URL, headers=headers, json=payload)
             res.raise_for_status()
             data = res.json()
